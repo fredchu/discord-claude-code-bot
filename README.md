@@ -95,7 +95,7 @@ Note: messages sent in terminal won't appear in the Discord thread (and vice ver
 
 ## Roadmap
 
-- [ ] [ACP (Agent Client Protocol)](https://github.com/anthropics/agent-protocol) support for multi-agent bridging
+- [ ] [ACP (Agent Client Protocol)](https://github.com/agentclientprotocol/agent-client-protocol) support for multi-agent bridging
 - [ ] Streaming responses
 - [ ] Multi-guild support
 
@@ -202,7 +202,7 @@ claude --resume <session-id>
 
 ## Roadmap
 
-- [ ] [ACP (Agent Client Protocol)](https://github.com/anthropics/agent-protocol) 支援，實現多代理人橋接
+- [ ] [ACP (Agent Client Protocol)](https://github.com/agentclientprotocol/agent-client-protocol) 支援，實現多代理人橋接
 - [ ] 串流回應
 - [ ] 多伺服器支援
 
