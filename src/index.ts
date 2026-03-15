@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
-  Client, GatewayIntentBits, Events, AttachmentBuilder,
+  Client, GatewayIntentBits, Events,
   REST, Routes, SlashCommandBuilder,
   type Message, type Collection, type Snowflake,
 } from "discord.js";
@@ -83,7 +83,6 @@ async function fetchThreadHistory(
 
   const sorted = [...messages.values()]
     .sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-    // Filter out bot's own messages (already in session via --resume)
     .filter((m) => m.author.id !== botUserId);
 
   if (sorted.length === 0) return "";
@@ -103,13 +102,18 @@ async function fetchThreadHistory(
   return `[${label}]\n${lines.join("\n")}\n[End]\n\n`;
 }
 
-// --- Runner ---
+// --- Streaming Runner ---
 
 const running = new Map<string, ChildProcess>();
 
-type RunResult = { text: string; exitCode: number };
+type StreamCallbacks = {
+  onText?: (fullText: string) => void;
+  onToolUse?: (toolName: string) => void;
+};
 
-function runClaude(opts: {
+type RunResult = { text: string; exitCode: number; costUsd?: number };
+
+function runClaudeStreaming(opts: {
   sessionId: string;
   prompt: string;
   cwd: string;
@@ -118,6 +122,7 @@ function runClaude(opts: {
   resume: boolean;
   systemPrompt?: string;
   timeoutMs?: number;
+  callbacks?: StreamCallbacks;
 }): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const args = [
@@ -125,6 +130,9 @@ function runClaude(opts: {
       ...(opts.resume ? ["--resume", opts.sessionId] : ["--session-id", opts.sessionId]),
       "--model", opts.model,
       "--dangerously-skip-permissions",
+      "--output-format", "stream-json",
+      "--verbose",
+      "--include-partial-messages",
       ...(opts.systemPrompt ? ["--system-prompt", opts.systemPrompt] : []),
     ];
 
@@ -136,13 +144,48 @@ function runClaude(opts: {
 
     running.set(opts.sessionId, child);
 
-    let stdout = "";
-    let stderr = "";
+    let buffer = "";
+    let lastSeenText = "";
+    let resultText = "";
+    let costUsd: number | undefined;
     let settled = false;
-    child.stdout.on("data", (d) => (stdout += d.toString()));
-    child.stderr.on("data", (d) => (stderr += d.toString()));
 
-    const timeout = opts.timeoutMs ?? 600_000; // 10 minutes
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop()!;
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+
+          if (event.type === "assistant" && event.message?.content) {
+            let messageText = "";
+            for (const block of event.message.content) {
+              if (block.type === "text") {
+                messageText += block.text || "";
+              } else if (block.type === "tool_use" && block.name) {
+                opts.callbacks?.onToolUse?.(block.name);
+              }
+            }
+            if (messageText && messageText !== lastSeenText) {
+              lastSeenText = messageText;
+              opts.callbacks?.onText?.(messageText);
+            }
+          }
+
+          if (event.type === "result") {
+            resultText = event.result || "";
+            costUsd = event.total_cost_usd;
+          }
+        } catch {
+          // Not valid JSON, skip
+        }
+      }
+    });
+
+    const timeout = opts.timeoutMs ?? 600_000;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -159,16 +202,101 @@ function runClaude(opts: {
       reject(err);
     });
 
-    // Use "close" instead of "exit" to ensure all stdio data is fully read
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       running.delete(opts.sessionId);
-      const text = stdout.trim() || stderr.trim() || "(no output)";
-      resolve({ text, exitCode: code ?? 1 });
+      const text = resultText || lastSeenText || "(no output)";
+      resolve({ text, exitCode: code ?? 1, costUsd });
     });
   });
+}
+
+// --- Chunked message sending ---
+
+const DISCORD_MAX_LEN = 2000;
+const CHUNK_LEN = 1900;
+
+async function sendChunked(
+  channel: { send: (content: string) => Promise<Message> },
+  text: string,
+  replyTo?: Message,
+): Promise<Message> {
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += CHUNK_LEN) {
+    chunks.push(text.slice(i, i + CHUNK_LEN));
+  }
+
+  let firstMsg: Message | undefined;
+  for (let i = 0; i < chunks.length; i++) {
+    if (i === 0 && replyTo) {
+      firstMsg = await replyTo.reply(chunks[i]);
+    } else {
+      const msg = await channel.send(chunks[i]);
+      if (i === 0) firstMsg = msg;
+    }
+  }
+  return firstMsg!;
+}
+
+// --- Streaming preview throttle ---
+
+const STREAM_THROTTLE_MS = 1500;
+const STREAM_MIN_DELTA = 40;
+const PREVIEW_MAX_LEN = 1900;
+
+type PreviewState = {
+  msg: Message | null;
+  lastText: string;
+  lastEditTime: number;
+  timer: NodeJS.Timeout | null;
+  pendingText: string;
+};
+
+function createPreviewState(): PreviewState {
+  return { msg: null, lastText: "", lastEditTime: 0, timer: null, pendingText: "" };
+}
+
+function flushPreview(ps: PreviewState): void {
+  if (!ps.msg || !ps.pendingText) return;
+  const display = ps.pendingText.slice(0, PREVIEW_MAX_LEN) + "\n\n⏳ *streaming...*";
+  ps.msg.edit(display).catch(() => {});
+  ps.lastText = ps.pendingText;
+  ps.lastEditTime = Date.now();
+}
+
+function handleStreamText(ps: PreviewState, fullText: string): void {
+  ps.pendingText = fullText;
+
+  const delta = fullText.length - ps.lastText.length;
+  const elapsed = Date.now() - ps.lastEditTime;
+
+  // Not enough new content
+  if (delta < STREAM_MIN_DELTA && ps.lastEditTime > 0) {
+    if (!ps.timer) {
+      ps.timer = setTimeout(() => {
+        ps.timer = null;
+        flushPreview(ps);
+      }, STREAM_THROTTLE_MS);
+    }
+    return;
+  }
+
+  // Too soon since last edit
+  if (elapsed < STREAM_THROTTLE_MS && ps.lastEditTime > 0) {
+    if (!ps.timer) {
+      ps.timer = setTimeout(() => {
+        ps.timer = null;
+        flushPreview(ps);
+      }, STREAM_THROTTLE_MS - elapsed);
+    }
+    return;
+  }
+
+  // Enough content & time — flush immediately
+  if (ps.timer) clearTimeout(ps.timer);
+  flushPreview(ps);
 }
 
 // --- Discord ---
@@ -177,7 +305,6 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
 const DEFAULT_CWD = process.env.DEFAULT_CWD ?? process.cwd();
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 const GUILD_ID = process.env.GUILD_ID;
-const MAX_INLINE = 1500;
 
 const slashCommands = [
   new SlashCommandBuilder().setName("help").setDescription("Show available commands"),
@@ -340,18 +467,15 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    await message.channel.sendTyping();
-    const typingInterval = setInterval(() => {
-      message.channel.sendTyping().catch(() => {});
-    }, 8_000);
-
-    const pending = await message.reply("Processing...");
+    // Send initial preview message
+    const previewState = createPreviewState();
+    previewState.msg = await message.reply("⏳ *Thinking...*");
 
     try {
       const history = await fetchThreadHistory(message.channel, entry, client.user!.id);
       const prompt = history ? `${history}${content}` : content;
 
-      const result = await runClaude({
+      const result = await runClaudeStreaming({
         sessionId: entry.sessionId,
         prompt,
         cwd: entry.cwd,
@@ -359,9 +483,16 @@ client.on(Events.MessageCreate, async (message) => {
         claudeBin: CLAUDE_BIN,
         resume: entry.started,
         systemPrompt: SYSTEM_PROMPT,
+        callbacks: {
+          onText: (fullText) => handleStreamText(previewState, fullText),
+          onToolUse: (toolName) => {
+            console.log(`[discord-cc-bot] tool: ${toolName}`);
+          },
+        },
       });
 
-      clearInterval(typingInterval);
+      // Cancel any pending throttle timer
+      if (previewState.timer) clearTimeout(previewState.timer);
 
       const isFirstReply = !entry.started;
       if (isFirstReply) {
@@ -373,29 +504,32 @@ client.on(Events.MessageCreate, async (message) => {
         : "";
       const responseText = `${disclosure}${result.text}`;
 
+      // Final delivery
       let botReply: Message;
       try {
-        await pending.delete().catch(() => {});
-        if (responseText.length <= MAX_INLINE) {
-          botReply = await message.reply(responseText);
+        if (responseText.length <= DISCORD_MAX_LEN) {
+          // Edit the preview message with final text
+          await previewState.msg!.edit(responseText);
+          botReply = previewState.msg!;
         } else {
-          const buf = Buffer.from(result.text, "utf8");
-          const file = new AttachmentBuilder(buf, { name: "response.txt" });
-          const preview = disclosure + result.text.slice(0, 200) + "...";
-          botReply = await message.reply({ content: preview, files: [file] });
+          // Delete preview, send chunked
+          await previewState.msg!.delete().catch(() => {});
+          botReply = await sendChunked(message.channel, responseText, message);
         }
       } catch (replyErr) {
-        console.error("[discord-cc-bot] reply failed, trying channel.send fallback:", (replyErr as Error).message);
-        // Fallback: send to channel directly instead of replying
-        botReply = await message.channel.send(responseText.slice(0, 2000));
+        console.error("[discord-cc-bot] reply failed, trying fallback:", (replyErr as Error).message);
+        botReply = await message.channel.send(responseText.slice(0, DISCORD_MAX_LEN));
       }
 
       entry.lastBotMessageId = botReply.id;
       saveMap(threadMap);
     } catch (err) {
-      clearInterval(typingInterval);
-      await pending.delete().catch(() => {});
-      await message.reply(`Error: ${(err as Error).message}`);
+      if (previewState.timer) clearTimeout(previewState.timer);
+      if (previewState.msg) {
+        await previewState.msg.edit(`Error: ${(err as Error).message}`).catch(() => {});
+      } else {
+        await message.reply(`Error: ${(err as Error).message}`);
+      }
     }
   } catch (err) {
     console.error("[discord-cc-bot] handler error:", (err as Error).message);
