@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 - 2026-03-16
+
+### Features
+- Streaming response with real-time Discord message updates (stream-json mode, 1.5s throttle, 40-char minimum delta)
+- Long message auto-splitting for streaming output
+
+### Fixes
+- Correct ACP repository link in README
+
 ## 0.1.0 - 2026-03-09
 
 ### Features
