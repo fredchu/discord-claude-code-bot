@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 - 2026-03-19
+
+### Features
+- Increase task timeout from 10 to 30 minutes for long-running operations
+- Return partial results on timeout instead of empty error
+- Show elapsed time in streaming preview (e.g. "working... (2m34s)")
+- Display recent tool names in preview (e.g. "🔧 Read → Grep → Edit")
+
 ## 0.2.1 - 2026-03-19
 
 ### Fixes
