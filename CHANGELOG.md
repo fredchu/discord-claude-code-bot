@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 - 2026-03-23
+
+### Features
+- Interactive Discord buttons for AskUserQuestion permission prompts (replaces plain text)
+- Button click resumes Claude session with user's choice
+- Chained AskUserQuestion support (button → resume → another question → buttons again)
+- "Other..." button option for free-text answers
+
+### Improvements
+- Extract `sendAskButtons` helper to deduplicate button rendering logic
+- Extract `createToolUseHandler` helper to deduplicate streaming callbacks
+- Add Discord customId length guard (`.slice(0, 100)`)
+- Simplify redundant try/catch in button handler reply flow
+
 ## 0.3.0 - 2026-03-19
 
 ### Features
