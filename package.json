@@ -1,6 +1,6 @@
 {
   "name": "discord-claude-code-bot",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -12,9 +12,11 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
+    "better-sqlite3": "^12.8.0",
     "discord.js": "^14.22.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "tsx": "^4.19.0",
     "typescript": "^5.9.2"
   }

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import Database from "better-sqlite3";
 import {
   Client, GatewayIntentBits, Events,
   REST, Routes, SlashCommandBuilder,
@@ -9,7 +10,7 @@ import {
   type Message, type Collection, type Snowflake,
 } from "discord.js";
 
-// --- ThreadMap ---
+// --- ThreadMap (SQLite-backed) ---
 
 type ThreadEntry = {
   sessionId: string;
@@ -22,30 +23,97 @@ type ThreadEntry = {
 
 type ThreadMap = Record<string, ThreadEntry>;
 
-const MAP_PATH = path.join(import.meta.dirname, "..", "thread-map.json");
+const DB_PATH = path.join(import.meta.dirname, "..", "threads.db");
+const JSON_PATH = path.join(import.meta.dirname, "..", "thread-map.json");
 
-function loadMap(): ThreadMap {
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+
+db.exec(`CREATE TABLE IF NOT EXISTS threads (
+  threadId TEXT PRIMARY KEY,
+  sessionId TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  model TEXT NOT NULL,
+  createdAt INTEGER NOT NULL,
+  started INTEGER NOT NULL DEFAULT 0,
+  lastBotMessageId TEXT
+)`);
+
+// One-time migration from JSON → SQLite
+if (fs.existsSync(JSON_PATH)) {
   try {
-    return JSON.parse(fs.readFileSync(MAP_PATH, "utf8")) as ThreadMap;
-  } catch {
-    return {};
+    const old: ThreadMap = JSON.parse(fs.readFileSync(JSON_PATH, "utf8"));
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO threads (threadId, sessionId, cwd, model, createdAt, started, lastBotMessageId)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const migrate = db.transaction(() => {
+      for (const [tid, e] of Object.entries(old)) {
+        insert.run(tid, e.sessionId, e.cwd, e.model, e.createdAt, e.started ? 1 : 0, e.lastBotMessageId ?? null);
+      }
+    });
+    migrate();
+    fs.renameSync(JSON_PATH, JSON_PATH + ".bak");
+    console.log(`[discord-cc-bot] migrated ${Object.keys(old).length} threads from JSON → SQLite`);
+  } catch (err) {
+    console.error("[discord-cc-bot] JSON migration failed:", err);
   }
 }
 
-function saveMap(map: ThreadMap): void {
-  fs.writeFileSync(MAP_PATH, JSON.stringify(map, null, 2));
+// Prepared statements
+const stmtGet = db.prepare("SELECT * FROM threads WHERE threadId = ?");
+const stmtUpsert = db.prepare(
+  `INSERT OR REPLACE INTO threads (threadId, sessionId, cwd, model, createdAt, started, lastBotMessageId)
+   VALUES (@threadId, @sessionId, @cwd, @model, @createdAt, @started, @lastBotMessageId)`,
+);
+const stmtAll = db.prepare("SELECT * FROM threads");
+
+function rowToEntry(row: any): ThreadEntry {
+  return {
+    sessionId: row.sessionId,
+    cwd: row.cwd,
+    model: row.model,
+    createdAt: row.createdAt,
+    started: !!row.started,
+    lastBotMessageId: row.lastBotMessageId ?? undefined,
+  };
+}
+
+function loadMap(): ThreadMap {
+  const map: ThreadMap = {};
+  for (const row of stmtAll.all() as any[]) {
+    map[row.threadId] = rowToEntry(row);
+  }
+  return map;
+}
+
+function saveEntry(threadId: string, entry: ThreadEntry): void {
+  stmtUpsert.run({
+    threadId,
+    sessionId: entry.sessionId,
+    cwd: entry.cwd,
+    model: entry.model,
+    createdAt: entry.createdAt,
+    started: entry.started ? 1 : 0,
+    lastBotMessageId: entry.lastBotMessageId ?? null,
+  });
 }
 
 function getOrCreate(map: ThreadMap, threadId: string, defaultCwd: string): ThreadEntry {
   if (!map[threadId]) {
-    map[threadId] = {
-      sessionId: crypto.randomUUID(),
-      cwd: defaultCwd,
-      model: "opus",
-      createdAt: Date.now(),
-      started: false,
-    };
-    saveMap(map);
+    const row = stmtGet.get(threadId) as any;
+    if (row) {
+      map[threadId] = rowToEntry(row);
+    } else {
+      map[threadId] = {
+        sessionId: crypto.randomUUID(),
+        cwd: defaultCwd,
+        model: "opus",
+        createdAt: Date.now(),
+        started: false,
+      };
+      saveEntry(threadId, map[threadId]);
+    }
   }
   return map[threadId];
 }
@@ -245,6 +313,7 @@ function runClaudeStreaming(opts: {
 
 async function sendAskButtons(
   channel: { send: (opts: any) => Promise<Message> },
+  threadId: string,
   entry: ThreadEntry,
   denial: PermissionDenial,
 ): Promise<void> {
@@ -272,7 +341,7 @@ async function sendAskButtons(
     });
     entry.lastBotMessageId = botReply.id;
   }
-  saveMap(threadMap);
+  saveEntry(threadId, entry);
 }
 
 // --- Streaming tool-use callback ---
@@ -559,7 +628,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const askDenial = result.permissionDenials?.find(d => d.tool_name === "AskUserQuestion");
           if (askDenial) {
             await previewState.msg!.delete().catch(() => {});
-            await sendAskButtons(ch, entry, askDenial);
+            await sendAskButtons(ch, threadId, entry, askDenial);
             return;
           }
 
@@ -571,7 +640,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             botReply = await sendChunked(ch, result.text);
           }
           entry.lastBotMessageId = botReply.id;
-          saveMap(threadMap);
+          saveEntry(threadId, entry);
         } catch (err) {
           if (previewState.timer) clearTimeout(previewState.timer);
           if (previewState.msg) await previewState.msg.edit(`Error: ${(err as Error).message}`).catch(() => {});
@@ -622,7 +691,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const entry = getOrCreate(threadMap, threadId, DEFAULT_CWD);
       entry.sessionId = crypto.randomUUID();
       entry.started = false;
-      saveMap(threadMap);
+      saveEntry(threadId, entry);
       await interaction.reply({ content: "Context cleared. Next message starts a new conversation.", ephemeral: true });
       return;
     }
@@ -636,7 +705,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const threadId = interaction.channelId;
       const entry = getOrCreate(threadMap, threadId, DEFAULT_CWD);
       entry.model = name;
-      saveMap(threadMap);
+      saveEntry(threadId, entry);
       await interaction.reply({ content: `Model -> \`${name}\``, ephemeral: true });
       return;
     }
@@ -654,7 +723,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const threadId = interaction.channelId;
       const entry = getOrCreate(threadMap, threadId, DEFAULT_CWD);
       entry.cwd = dir;
-      saveMap(threadMap);
+      saveEntry(threadId, entry);
       await interaction.reply({ content: `cwd -> \`${dir}\``, ephemeral: true });
       return;
     }
@@ -742,7 +811,7 @@ client.on(Events.MessageCreate, async (message) => {
       if (askDenial) {
         await previewState.msg!.delete().catch(() => {});
         entry.started = true;
-        await sendAskButtons(message.channel, entry, askDenial);
+        await sendAskButtons(message.channel, threadId, entry, askDenial);
         return; // Wait for button click — handler will resume
       }
 
@@ -772,7 +841,7 @@ client.on(Events.MessageCreate, async (message) => {
       }
 
       entry.lastBotMessageId = botReply.id;
-      saveMap(threadMap);
+      saveEntry(threadId, entry);
     } catch (err) {
       if (previewState.timer) clearTimeout(previewState.timer);
       if (previewState.msg) {
@@ -786,10 +855,14 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-process.on("SIGINT", () => {
+function shutdown() {
   for (const child of running.values()) child.kill("SIGTERM");
+  db.close();
   client.destroy();
   process.exit(0);
-});
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 
 client.login(DISCORD_TOKEN);

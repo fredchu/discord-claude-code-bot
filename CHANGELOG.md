@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 - 2026-03-23
+
+### Features
+- Replace `thread-map.json` with SQLite (`better-sqlite3` + WAL mode) for crash-safe session storage
+- Auto-migrate existing JSON data to SQLite on first startup (rename `.bak` after success)
+- Per-entry upsert via `saveEntry()` instead of full-file overwrite
+- Graceful shutdown on both SIGINT and SIGTERM (closes DB properly)
+
 ## 0.4.2 - 2026-03-23
 
 ### Fixes

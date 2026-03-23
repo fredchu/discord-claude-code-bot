@@ -9,6 +9,10 @@ dist/
 
 # Runtime state
 thread-map.json
+thread-map.json.bak
+threads.db
+threads.db-wal
+threads.db-shm
 
 # macOS
 .DS_Store
