@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 - 2026-03-23
+
+### Fixes
+- Rewrite `splitMessage` with segment-based approach — code blocks are never broken across Discord message chunks
+- Oversized code blocks (>2000 chars) are split and re-wrapped with proper fences on each chunk
+- Long AskUserQuestion replies now use `sendChunked` instead of truncating at 2000 chars
+
 ## 0.4.1 - 2026-03-23
 
 ### Fixes

@@ -293,15 +293,86 @@ function createToolUseHandler(ps: PreviewState): (toolName: string) => void {
 const DISCORD_MAX_LEN = 2000;
 const CHUNK_LEN = 1900;
 
+function splitMessage(text: string): string[] {
+  if (text.length <= CHUNK_LEN) return [text];
+
+  // Split text into atomic segments: complete code blocks + surrounding text.
+  // Code blocks are never broken across chunks.
+  const segments: string[] = [];
+  const blockRegex = /^(`{3,})\w*\n[\s\S]*?^\1\s*$/gm;
+  let lastEnd = 0;
+
+  for (const match of text.matchAll(blockRegex)) {
+    if (match.index! > lastEnd) {
+      segments.push(text.slice(lastEnd, match.index!));
+    }
+    segments.push(match[0]);
+    lastEnd = match.index! + match[0].length;
+  }
+  if (lastEnd < text.length) {
+    segments.push(text.slice(lastEnd));
+  }
+
+  // Pack segments into chunks, splitting only at segment boundaries
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const seg of segments) {
+    const combined = current + seg;
+    if (combined.length <= CHUNK_LEN) {
+      current = combined;
+      continue;
+    }
+
+    // Won't fit — flush current chunk, start new one
+    if (current) chunks.push(current);
+
+    if (seg.length <= CHUNK_LEN) {
+      current = seg;
+    } else {
+      // Oversized segment — detect if it's a code block
+      const fenceMatch = seg.match(/^(`{3,})(\w*)\n/);
+      if (fenceMatch) {
+        // It's a code block — strip outer fences, split inner content, re-wrap each piece
+        const fence = fenceMatch[1];
+        const lang = fenceMatch[2];
+        const header = fence + lang + "\n";
+        const footer = "\n" + fence;
+        const closeIdx = seg.lastIndexOf("\n" + fence);
+        const body = seg.slice(header.length, closeIdx === -1 ? seg.length : closeIdx);
+        const maxBody = CHUNK_LEN - header.length - footer.length;
+        let rem = body;
+        while (rem.length > maxBody) {
+          let splitAt = rem.lastIndexOf("\n", maxBody);
+          if (splitAt < maxBody / 2) splitAt = maxBody;
+          chunks.push(header + rem.slice(0, splitAt) + footer);
+          rem = rem.slice(splitAt + (rem[splitAt] === "\n" ? 1 : 0));
+        }
+        current = header + rem + footer;
+      } else {
+        // Plain text oversized — split at newlines
+        let rem = seg;
+        while (rem.length > CHUNK_LEN) {
+          let splitAt = rem.lastIndexOf("\n", CHUNK_LEN);
+          if (splitAt < CHUNK_LEN / 2) splitAt = CHUNK_LEN;
+          chunks.push(rem.slice(0, splitAt));
+          rem = rem.slice(splitAt + (rem[splitAt] === "\n" ? 1 : 0));
+        }
+        current = rem;
+      }
+    }
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 async function sendChunked(
   channel: { send: (content: string) => Promise<Message> },
   text: string,
   replyTo?: Message,
 ): Promise<Message> {
-  const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += CHUNK_LEN) {
-    chunks.push(text.slice(i, i + CHUNK_LEN));
-  }
+  const chunks = splitMessage(text);
 
   let firstMsg: Message | undefined;
   for (let i = 0; i < chunks.length; i++) {
@@ -493,7 +564,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           await previewState.msg!.delete().catch(() => {});
-          let botReply: Message = await ch.send(result.text.slice(0, DISCORD_MAX_LEN));
+          let botReply: Message;
+          if (result.text.length <= DISCORD_MAX_LEN) {
+            botReply = await ch.send(result.text);
+          } else {
+            botReply = await sendChunked(ch, result.text);
+          }
           entry.lastBotMessageId = botReply.id;
           saveMap(threadMap);
         } catch (err) {
