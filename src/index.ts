@@ -5,6 +5,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   Client, GatewayIntentBits, Events,
   REST, Routes, SlashCommandBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
   type Message, type Collection, type Snowflake,
 } from "discord.js";
 
@@ -111,7 +112,20 @@ type StreamCallbacks = {
   onToolUse?: (toolName: string) => void;
 };
 
-type RunResult = { text: string; exitCode: number; costUsd?: number };
+type AskQuestion = {
+  question: string;
+  header: string;
+  options: { label: string; description: string }[];
+  multiSelect: boolean;
+};
+
+type PermissionDenial = {
+  tool_name: string;
+  tool_use_id: string;
+  tool_input: { questions: AskQuestion[] };
+};
+
+type RunResult = { text: string; exitCode: number; costUsd?: number; permissionDenials?: PermissionDenial[] };
 
 function runClaudeStreaming(opts: {
   sessionId: string;
@@ -148,6 +162,7 @@ function runClaudeStreaming(opts: {
     let lastSeenText = "";
     let resultText = "";
     let costUsd: number | undefined;
+    let permissionDenials: PermissionDenial[] | undefined;
     let settled = false;
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -178,6 +193,9 @@ function runClaudeStreaming(opts: {
           if (event.type === "result") {
             resultText = event.result || "";
             costUsd = event.total_cost_usd;
+            if (event.permission_denials?.length > 0) {
+              permissionDenials = event.permission_denials;
+            }
           }
         } catch {
           // Not valid JSON, skip
@@ -217,9 +235,56 @@ function runClaudeStreaming(opts: {
       clearTimeout(timer);
       running.delete(opts.sessionId);
       const text = resultText || lastSeenText || "(no output)";
-      resolve({ text, exitCode: code ?? 1, costUsd });
+      resolve({ text, exitCode: code ?? 1, costUsd, permissionDenials });
     });
   });
+}
+
+// --- AskUserQuestion button rendering ---
+
+async function sendAskButtons(
+  channel: { send: (opts: any) => Promise<Message> },
+  entry: ThreadEntry,
+  denial: PermissionDenial,
+): Promise<void> {
+  for (const q of denial.tool_input.questions) {
+    const row = new ActionRowBuilder<ButtonBuilder>();
+    for (const opt of q.options.slice(0, 4)) {
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`ask_${entry.sessionId}_${opt.label}`.slice(0, 100))
+          .setLabel(opt.label)
+          .setStyle(ButtonStyle.Primary),
+      );
+    }
+    if (q.options.length <= 3) {
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`ask_${entry.sessionId}_OTHER`)
+          .setLabel("Other...")
+          .setStyle(ButtonStyle.Secondary),
+      );
+    }
+    const botReply = await channel.send({
+      content: `❓ **${q.question}**`,
+      components: [row],
+    });
+    entry.lastBotMessageId = botReply.id;
+  }
+  saveMap(threadMap);
+}
+
+// --- Streaming tool-use callback ---
+
+function createToolUseHandler(ps: PreviewState): (toolName: string) => void {
+  return (toolName) => {
+    console.log(`[discord-cc-bot] tool: ${toolName}`);
+    ps.toolsUsed.push(toolName);
+    if (ps.msg) {
+      const text = (ps.pendingText || "").slice(0, PREVIEW_MAX_LEN);
+      ps.msg.edit(text + buildStatusLine(ps)).catch(() => {});
+    }
+  };
 }
 
 // --- Chunked message sending ---
@@ -374,6 +439,84 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  // --- Button handler ---
+  if (interaction.isButton()) {
+    const id = interaction.customId;
+    console.log(`[discord-cc-bot] button: ${id} by ${interaction.user.username}`);
+
+    // AskUserQuestion buttons: ask_<sessionId>_<answer>
+    if (id.startsWith("ask_")) {
+      const parts = id.split("_");
+      const sessionId = parts[1];
+      const answer = parts.slice(2).join("_");
+      const threadId = interaction.channelId;
+      const entry = threadMap[threadId];
+
+      if (answer === "OTHER") {
+        await interaction.reply({ content: "Type your answer as a regular message:", ephemeral: true });
+        return;
+      }
+
+      await interaction.update({ content: `✅ **${answer}**`, components: [] });
+
+      // Resume claude with the answer
+      if (entry && !running.has(entry.sessionId)) {
+        const ch = interaction.channel!;
+        if (!("send" in ch)) return;
+        const previewState = createPreviewState();
+        previewState.msg = await ch.send("⏳ *Continuing...*");
+
+        try {
+          const result = await runClaudeStreaming({
+            sessionId: entry.sessionId,
+            prompt: `I choose: ${answer}`,
+            cwd: entry.cwd,
+            model: entry.model,
+            claudeBin: CLAUDE_BIN,
+            resume: true,
+            systemPrompt: SYSTEM_PROMPT,
+            callbacks: {
+              onText: (fullText) => handleStreamText(previewState, fullText),
+              onToolUse: createToolUseHandler(previewState),
+            },
+          });
+
+          if (previewState.timer) clearTimeout(previewState.timer);
+
+          // Check for AskUserQuestion denials — render as Discord buttons
+          const askDenial = result.permissionDenials?.find(d => d.tool_name === "AskUserQuestion");
+          if (askDenial) {
+            await previewState.msg!.delete().catch(() => {});
+            await sendAskButtons(ch, entry, askDenial);
+            return;
+          }
+
+          await previewState.msg!.delete().catch(() => {});
+          let botReply: Message = await ch.send(result.text.slice(0, DISCORD_MAX_LEN));
+          entry.lastBotMessageId = botReply.id;
+          saveMap(threadMap);
+        } catch (err) {
+          if (previewState.timer) clearTimeout(previewState.timer);
+          if (previewState.msg) await previewState.msg.edit(`Error: ${(err as Error).message}`).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // Test buttons (temporary)
+    if (id.startsWith("test_")) {
+      const choice = id.replace("test_", "");
+      console.log(`[discord-cc-bot] test button: ${choice}`);
+      await interaction.update({
+        content: `✅ **你選了：${choice}**\n\nBot 收到了你的選擇！按鈕互動成功。`,
+        components: [],
+      });
+      return;
+    }
+
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   const { commandName } = interaction;
@@ -510,20 +653,21 @@ client.on(Events.MessageCreate, async (message) => {
         systemPrompt: SYSTEM_PROMPT,
         callbacks: {
           onText: (fullText) => handleStreamText(previewState, fullText),
-          onToolUse: (toolName) => {
-            console.log(`[discord-cc-bot] tool: ${toolName}`);
-            previewState.toolsUsed.push(toolName);
-            if (previewState.msg) {
-              const text = (previewState.pendingText || "").slice(0, PREVIEW_MAX_LEN);
-              const display = text + buildStatusLine(previewState);
-              previewState.msg.edit(display).catch(() => {});
-            }
-          },
+          onToolUse: createToolUseHandler(previewState),
         },
       });
 
       // Cancel any pending throttle timer
       if (previewState.timer) clearTimeout(previewState.timer);
+
+      // Check for AskUserQuestion denials — render as Discord buttons
+      const askDenial = result.permissionDenials?.find(d => d.tool_name === "AskUserQuestion");
+      if (askDenial) {
+        await previewState.msg!.delete().catch(() => {});
+        entry.started = true;
+        await sendAskButtons(message.channel, entry, askDenial);
+        return; // Wait for button click — handler will resume
+      }
 
       const isFirstReply = !entry.started;
       if (isFirstReply) {
