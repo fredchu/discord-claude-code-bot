@@ -13,6 +13,7 @@ thread-map.json.bak
 threads.db
 threads.db-wal
 threads.db-shm
+tmp-attachments/
 
 # macOS
 .DS_Store

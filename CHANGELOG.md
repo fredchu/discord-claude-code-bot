@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 - 2026-03-25
+
+### Features
+- File attachment support — images, code, PDFs, or any file sent in Discord are auto-downloaded and passed to Claude Code via the Read tool
+- Type-agnostic design: no per-format handling, Claude Code decides how to read each file
+- 10 MB per-file size limit, temp files auto-cleaned after response
+
 ## 0.6.0 - 2026-03-25
 
 ### Features

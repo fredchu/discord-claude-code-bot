@@ -8,6 +8,7 @@ A lightweight Discord bot that bridges Discord threads to [Claude Code](https://
 - **Thread context** — fetches recent messages so Claude understands the conversation
 - **Streaming preview** — real-time response preview with tool-use status line while Claude is working
 - **Interactive buttons** — AskUserQuestion permission prompts rendered as Discord buttons
+- **File attachments** — send images, code, PDFs, or any file — auto-downloaded and passed to Claude Code's Read tool
 - **Code fence splitting** — long responses split into Discord-safe chunks without breaking code blocks
 - **Resume local sessions** — `/resume-local` picks up a terminal CC session from Discord (mobile use case); `/handback` returns it
 - **SQLite storage** — crash-safe session persistence with WAL mode (auto-migrates from legacy JSON)
@@ -138,6 +139,7 @@ MIT
 - **討論串上下文** — 擷取近期訊息讓 Claude 理解對話脈絡
 - **串流預覽** — Claude 工作時即時預覽回應內容，附帶工具使用狀態列
 - **互動按鈕** — AskUserQuestion 權限提示以 Discord 按鈕呈現
+- **檔案附件** — 傳送圖片、程式碼、PDF 或任何檔案 — 自動下載並傳給 Claude Code 的 Read tool
 - **Code Fence 分段** — 長回覆自動分段，不會切斷 code block
 - **Resume 本地 Session** — `/resume-local` 從 Discord 接手終端機的 CC session（手機使用情境）；`/handback` 交還
 - **SQLite 儲存** — 使用 WAL 模式的 crash-safe session 持久化（自動從舊版 JSON 遷移）

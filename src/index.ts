@@ -481,6 +481,19 @@ function createToolUseHandler(ps: PreviewState): (toolName: string) => void {
   };
 }
 
+// --- Attachment handling ---
+
+const ATTACH_TMP_DIR = path.join(import.meta.dirname, "..", "tmp-attachments");
+const ATTACH_MAX_BYTES = 10 * 1024 * 1024; // 10 MB per file
+
+async function downloadAttachment(url: string, filepath: string): Promise<void> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to download: ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.mkdirSync(path.dirname(filepath), { recursive: true });
+  fs.writeFileSync(filepath, buf);
+}
+
 // --- Chunked message sending ---
 
 const DISCORD_MAX_LEN = 2000;
@@ -1042,7 +1055,8 @@ client.on(Events.MessageCreate, async (message) => {
     if (!message.mentions.has(client.user!.id)) return;
 
     const content = message.content.replace(/<@!?\d+>/g, "").trim();
-    if (!content) return;
+    const attachments = [...message.attachments.values()];
+    if (!content && attachments.length === 0) return;
 
     const threadId = message.channelId;
     const entry = getOrCreate(threadMap, threadId, DEFAULT_CWD);
@@ -1056,9 +1070,32 @@ client.on(Events.MessageCreate, async (message) => {
     const previewState = createPreviewState();
     previewState.msg = await message.reply("⏳ *Thinking...*");
 
+    // Download all attachments — let Claude Code handle them via Read tool
+    const filePaths: string[] = [];
+    for (const att of attachments) {
+      if (att.size > ATTACH_MAX_BYTES) {
+        console.log(`[discord-cc-bot] skipping oversized attachment: ${att.name} (${att.size} bytes)`);
+        continue;
+      }
+      const ext = att.name?.split(".").pop() ?? "bin";
+      const filepath = path.join(ATTACH_TMP_DIR, `${message.id}_${att.id}.${ext}`);
+      try {
+        await downloadAttachment(att.url, filepath);
+        filePaths.push(filepath);
+      } catch (err) {
+        console.error(`[discord-cc-bot] attachment download failed: ${(err as Error).message}`);
+      }
+    }
+
     try {
       const history = await fetchThreadHistory(message.channel, entry, client.user!.id, message.id);
-      const prompt = history ? `${history}${content}` : content;
+      let userMessage = content;
+      if (filePaths.length === 1) {
+        userMessage = `${content}\n\nThe user attached a file: ${filePaths[0]}`.trim();
+      } else if (filePaths.length > 1) {
+        userMessage = `${content}\n\nThe user attached files:\n${filePaths.map((p) => `- ${p}`).join("\n")}`.trim();
+      }
+      const prompt = history ? `${history}${userMessage}` : userMessage;
 
       const result = await runClaudeStreaming({
         sessionId: entry.sessionId,
@@ -1120,6 +1157,8 @@ client.on(Events.MessageCreate, async (message) => {
       } else {
         await message.reply(`Error: ${(err as Error).message}`);
       }
+    } finally {
+      for (const p of filePaths) fs.unlink(p, () => {});
     }
   } catch (err) {
     console.error("[discord-cc-bot] handler error:", (err as Error).message);
