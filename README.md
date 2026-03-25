@@ -1,15 +1,17 @@
 # discord-claude-code-bot
 
-A lightweight Discord bot that bridges Discord threads to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI sessions. Single file, ~400 lines of TypeScript. Mention the bot in a thread, and it spawns a Claude Code process that persists across messages via `--resume`.
+A lightweight Discord bot that bridges Discord threads to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI sessions. Single file, ~800 lines of TypeScript. Mention the bot in a thread, and it spawns a Claude Code process that persists across messages via `--resume`.
 
 ## Features
 
 - **Thread sessions** — each Discord thread maps to a Claude Code session with automatic `--resume`
 - **Thread context** — fetches recent messages so Claude understands the conversation
+- **Streaming preview** — real-time response preview with tool-use status line while Claude is working
+- **Interactive buttons** — AskUserQuestion permission prompts rendered as Discord buttons
+- **Code fence splitting** — long responses split into Discord-safe chunks without breaking code blocks
+- **SQLite storage** — crash-safe session persistence with WAL mode (auto-migrates from legacy JSON)
 - **Slash commands** — `/new`, `/model`, `/cd`, `/stop`, `/sessions`, `/help`
 - **Model switching** — swap between opus, sonnet, haiku per thread
-- **Long responses** — replies over 1500 chars are sent as `.txt` attachments
-- **Typing indicator** — shows "typing..." while Claude is working
 - **AI disclosure** — first reply in each session includes an AI disclosure message
 
 ## Quick Start
@@ -25,8 +27,9 @@ npm start
 ### Prerequisites
 
 - Node.js 22+ (uses `--env-file` flag)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - A Discord bot token ([Discord Developer Portal](https://discord.com/developers/applications))
+- A C++ compiler toolchain for building `better-sqlite3` (Xcode CLT on macOS, `build-essential` on Linux)
 
 ### Discord Bot Setup
 
@@ -58,7 +61,7 @@ Discord Thread          Bot (this repo)           Claude Code CLI
 reply / .txt         send to thread     ◄────────  response
 ```
 
-Single-file architecture (`src/index.ts`, ~400 LOC). Session state is persisted in `thread-map.json` — a simple mapping from Discord thread ID to Claude Code session UUID.
+Single-file architecture (`src/index.ts`, ~800 LOC). Session state is persisted in a SQLite database (`threads.db` with WAL mode) — a crash-safe mapping from Discord thread ID to Claude Code session UUID.
 
 ## Slash Commands
 
@@ -80,8 +83,8 @@ The bot injects a system prompt that tells Claude it's running inside a Discord 
 Each thread maps to a standard Claude Code session. You can resume any bot session from your terminal:
 
 ```bash
-# find the session ID from thread-map.json
-cat thread-map.json | jq '."<thread-id>".sessionId'
+# find the session ID from SQLite
+sqlite3 threads.db "SELECT sessionId FROM threads WHERE threadId = '<thread-id>'"
 
 # resume in interactive mode
 claude --resume <session-id>
@@ -96,7 +99,8 @@ Note: messages sent in terminal won't appear in the Discord thread (and vice ver
 ## Roadmap
 
 - [ ] [ACP (Agent Client Protocol)](https://github.com/agentclientprotocol/agent-client-protocol) support for multi-agent bridging
-- [ ] Streaming responses
+- [x] Streaming responses (v0.3.0+)
+- [ ] Message queue (per-thread + global concurrency limit)
 - [ ] Multi-guild support
 
 ## License
@@ -107,16 +111,18 @@ MIT
 
 # discord-claude-code-bot
 
-一個輕量的 Discord 機器人，將 Discord 討論串橋接到 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI。單一檔案、約 400 行 TypeScript。在討論串中 @mention 機器人，它會啟動一個 Claude Code 程序，並透過 `--resume` 在訊息之間保持上下文。
+一個輕量的 Discord 機器人，將 Discord 討論串橋接到 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI。單一檔案、約 800 行 TypeScript。在討論串中 @mention 機器人，它會啟動一個 Claude Code 程序，並透過 `--resume` 在訊息之間保持上下文。
 
 ## 功能特色
 
 - **討論串 Session** — 每個 Discord 討論串對應一個 Claude Code session，自動 `--resume`
 - **討論串上下文** — 擷取近期訊息讓 Claude 理解對話脈絡
+- **串流預覽** — Claude 工作時即時預覽回應內容，附帶工具使用狀態列
+- **互動按鈕** — AskUserQuestion 權限提示以 Discord 按鈕呈現
+- **Code Fence 分段** — 長回覆自動分段，不會切斷 code block
+- **SQLite 儲存** — 使用 WAL 模式的 crash-safe session 持久化（自動從舊版 JSON 遷移）
 - **斜線指令** — `/new`、`/model`、`/cd`、`/stop`、`/sessions`、`/help`
 - **模型切換** — 每個討論串可獨立切換 opus、sonnet、haiku
-- **長回覆處理** — 超過 1500 字的回覆以 `.txt` 附件發送
-- **輸入指示器** — Claude 處理時顯示「正在輸入...」
 - **AI 揭露聲明** — 每個 session 的第一則回覆包含 AI 身份說明
 
 ## 快速開始
@@ -132,8 +138,9 @@ npm start
 ### 前置需求
 
 - Node.js 22+（使用 `--env-file` 旗標）
-- 已安裝 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
+- 已安裝並認證 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - Discord 機器人 Token（[Discord Developer Portal](https://discord.com/developers/applications)）
+- C++ 編譯工具鏈，用於編譯 `better-sqlite3`（macOS 需 Xcode CLT，Linux 需 `build-essential`）
 
 ### Discord 機器人設定
 
@@ -165,7 +172,7 @@ Discord 討論串          Bot（本 repo）            Claude Code CLI
 回覆 / .txt          送回討論串       ◄────────  回應內容
 ```
 
-單檔架構（`src/index.ts`，約 400 行）。Session 狀態存在 `thread-map.json` — 一個簡單的 Discord 討論串 ID 到 Claude Code session UUID 的對照表。
+單檔架構（`src/index.ts`，約 800 行）。Session 狀態存在 SQLite 資料庫（`threads.db`，使用 WAL 模式）— 一個 crash-safe 的 Discord 討論串 ID 到 Claude Code session UUID 對照表。
 
 ## 斜線指令
 
@@ -187,8 +194,8 @@ Discord 討論串          Bot（本 repo）            Claude Code CLI
 每個討論串對應一個標準的 Claude Code session。你可以在終端機用互動模式 resume 任何機器人的 session：
 
 ```bash
-# 從 thread-map.json 找到 session ID
-cat thread-map.json | jq '."<thread-id>".sessionId'
+# 從 SQLite 找到 session ID
+sqlite3 threads.db "SELECT sessionId FROM threads WHERE threadId = '<thread-id>'"
 
 # 用互動模式 resume
 claude --resume <session-id>
@@ -203,7 +210,8 @@ claude --resume <session-id>
 ## Roadmap
 
 - [ ] [ACP (Agent Client Protocol)](https://github.com/agentclientprotocol/agent-client-protocol) 支援，實現多代理人橋接
-- [ ] 串流回應
+- [x] 串流回應（v0.3.0+）
+- [ ] 訊息佇列（per-thread + 全域並行上限）
 - [ ] 多伺服器支援
 
 ## 授權
