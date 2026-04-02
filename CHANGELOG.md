@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.1 - 2026-04-02
+
+### Improvements
+- Increase task timeout from 30 to 90 minutes for long-running operations
+
 ## 0.8.0 - 2026-03-26
 
 ### Improvements
