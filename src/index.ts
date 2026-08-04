@@ -527,16 +527,19 @@ async function downloadAttachment(url: string, filepath: string): Promise<void> 
 // --- Voice messages ---
 //
 // A Discord voice message is an .ogg attachment carrying the IsVoiceMessage flag.
-// Two things make it invisible to the bot as-is:
-//   1. It has no text content, so it can never @mention anyone — the mention gate
-//      drops it before anything else runs.
-//   2. Even once it gets through, only the file path reaches Claude, and the Read
-//      tool cannot read audio — so the message silently does nothing.
+// Two things make it useless to the bot as-is:
+//   1. It carries no text, so it cannot @mention the bot the usual way. It can
+//      still satisfy the mention gate by being sent as a *reply* to the bot —
+//      MessageMentions#has counts the replied-to user, and Discord's reply UI
+//      pings by default — but a voice note that starts a turn is dropped.
+//   2. However it arrives, only the file path reaches Claude, and the Read tool
+//      cannot read audio — so the message silently does nothing.
 //
 // Transcription is opt-in via VOICE_TRANSCRIBE_CMD (a command taking the audio
 // file path as its final argument and printing the transcript to stdout, e.g.
-// a whisper wrapper). When unset, voice messages remain ignored because they
-// cannot satisfy the mention gate.
+// a whisper wrapper). When unset, the mention exemption is off and any voice
+// message that still gets in is answered with a notice rather than handed to
+// Claude as an unreadable path.
 function parseUserIds(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
@@ -1225,8 +1228,18 @@ client.on(Events.MessageCreate, async (message) => {
       // Voice message: transcribe first, so what the user *said* becomes the
       // instruction. Without this Claude only receives a path to an audio file
       // it has no way to read.
+      //
+      // Keyed on the message being a voice message, NOT on how it got past the
+      // gate above: replying to the bot mentions it (MessageMentions#has counts
+      // the replied-to user by default), so a voice message can arrive through
+      // the ordinary mention path with no text at all. Claude cannot read audio
+      // either way, so it must never be handed the attachment path.
       let voiceTranscript = "";
-      if (isVoiceMessage(message) && VOICE_ARGV.length > 0) {
+      if (isVoiceMessage(message)) {
+        if (VOICE_ARGV.length === 0) {
+          await finishPreview(previewState, message.channel, "⚠️ *Voice messages require `VOICE_TRANSCRIBE_CMD` to be configured.*");
+          return;
+        }
         if (filePaths.length === 0) {
           await finishPreview(previewState, message.channel, "⚠️ *Voice message could not be downloaded (too large, or the download failed).*");
           return;

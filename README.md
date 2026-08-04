@@ -50,7 +50,7 @@ npm start
 | `DEFAULT_CWD` | No | Default working directory for Claude Code (defaults to `process.cwd()`) |
 | `CLAUDE_BIN` | No | Path to Claude Code binary (defaults to `claude`) |
 | `ALLOWED_USER_IDS` | No | Comma-separated Discord user IDs allowed to use the bot at all, covering messages, slash commands, and buttons. When unset, anyone who can see the thread may use it, preserving the historical behavior. |
-| `VOICE_TRANSCRIBE_CMD` | No | Command used to transcribe Discord voice messages. Transcription is entirely off unless this is set; when unset, voice messages are ignored exactly as before this feature existed. The audio path is appended as the final argument and the transcript must be printed to stdout. The value is split on whitespace; use a JSON array such as `["/opt/my tools/whisper.sh","--model","large-v3"]` for paths containing spaces or arguments needing quoting. |
+| `VOICE_TRANSCRIBE_CMD` | No | Command used to transcribe Discord voice messages. Transcription is entirely off unless this is set; when unset, voice messages are ignored, and one that replies to the bot gets a short notice instead of being handed to Claude as an audio path it cannot read. The audio path is appended as the final argument and the transcript must be printed to stdout. The value is split on whitespace; use a JSON array such as `["/opt/my tools/whisper.sh","--model","large-v3"]` for paths containing spaces or arguments needing quoting. |
 | `VOICE_TRANSCRIBE_TIMEOUT_MS` | No | Transcription-command timeout in milliseconds (defaults to `300000`; invalid values fall back to that default). |
 | `VOICE_ALLOWED_USER_IDS` | No | Comma-separated Discord user-ID list allowed to use the voice-message mention exemption. When unset, only the thread's creator is allowed. |
 
@@ -187,7 +187,7 @@ npm start
 | `DEFAULT_CWD` | 否 | Claude Code 的預設工作目錄（預設為 `process.cwd()`） |
 | `CLAUDE_BIN` | 否 | Claude Code 執行檔路徑（預設為 `claude`） |
 | `ALLOWED_USER_IDS` | 否 | 可使用機器人所有功能的 Discord 使用者 ID 清單，以逗號分隔，涵蓋訊息、斜線指令與按鈕。未設定時，任何看得到討論串的人都可使用，維持原有行為。 |
-| `VOICE_TRANSCRIBE_CMD` | 否 | 轉錄 Discord 語音訊息的指令。除非設定此變數，否則轉錄功能完全關閉；未設定時，語音訊息會像此功能加入前一樣被忽略。音檔路徑會接在最後一個參數，轉錄稿必須輸出到 stdout。此值會依空白切分；若路徑含空白或參數需要引號，請使用 JSON 陣列，例如 `["/opt/my tools/whisper.sh","--model","large-v3"]`。 |
+| `VOICE_TRANSCRIBE_CMD` | 否 | 轉錄 Discord 語音訊息的指令。除非設定此變數，否則轉錄功能完全關閉；未設定時，語音訊息會被忽略，若是以回覆機器人的方式送出，則會收到一則提示，而不會把機器人讀不了的音檔路徑交給 Claude。音檔路徑會接在最後一個參數，轉錄稿必須輸出到 stdout。此值會依空白切分；若路徑含空白或參數需要引號，請使用 JSON 陣列，例如 `["/opt/my tools/whisper.sh","--model","large-v3"]`。 |
 | `VOICE_TRANSCRIBE_TIMEOUT_MS` | 否 | 轉錄指令的逾時毫秒數（預設 `300000`；無效值會改用此預設值）。 |
 | `VOICE_ALLOWED_USER_IDS` | 否 | 可使用語音訊息免標註規則的 Discord 使用者 ID 清單，以逗號分隔。未設定時，預設只允許討論串建立者。 |
 
