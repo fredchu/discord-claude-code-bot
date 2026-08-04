@@ -541,6 +541,8 @@ function parseUserIds(raw: string | undefined): string[] {
   return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 }
 
+const ALLOWED_USER_IDS = parseUserIds(process.env.ALLOWED_USER_IDS);
+
 function parseCommand(raw: string | undefined): string[] {
   const s = (raw ?? "").trim();
   if (!s) return [];
@@ -839,6 +841,13 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(interaction.user.id)) {
+    if (interaction.isRepliable()) {
+      await interaction.reply({ content: "Not authorized.", ephemeral: true }).catch(() => {});
+    }
+    return;
+  }
+
   // --- Button handler ---
   if (interaction.isButton()) {
     const id = interaction.customId;
@@ -1169,6 +1178,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (message.author.bot) return;
+    if (ALLOWED_USER_IDS.length > 0 && !ALLOWED_USER_IDS.includes(message.author.id)) return;
 
     // Only respond in threads, and only when mentioned. Configured voice messages
     // are exempt for allowed users, or for the thread creator by default.
