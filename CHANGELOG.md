@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.0 - 2026-08-04
+
+### Features
+- Discord voice messages in threads now reach Claude — mention exemption inside threads only, plus optional transcription via `VOICE_TRANSCRIBE_CMD` (by @bockybocky)
+- `ALLOWED_USER_IDS` authorization gate — comma-separated allowlist enforced on messages, slash commands, buttons, and select menus; unset preserves the previous open behaviour
+- `VOICE_ALLOWED_USER_IDS` for the mentionless voice path, defaulting to the thread's creator
+- Reference transcription helper `scripts/transcribe.py` — auto-detects mlx-whisper (Apple Silicon GPU) or faster-whisper (CPU), `--terms` for domain vocabulary, VAD on by default because silence otherwise produces fluent hallucinations
+
+### Improvements
+- Task timeout raised from 90 minutes to 2.5 hours
+- README states plainly that skipped permission checks mean any authorized user can run code on the host
+
+### Fixes
+- Voice messages are handled on the `IsVoiceMessage` flag alone — a voice message sent as a reply satisfied the ordinary mention path and reached Claude as an unreadable `.ogg` path
+- Transcription failure reports and stops instead of falling back to passing the `.ogg` path to Claude
+- Validate `VOICE_TRANSCRIBE_TIMEOUT_MS` — `NaN` threw synchronously, fractions below 1 disabled the timeout, and values above 2^31-1 silently became 1 ms
+- `VOICE_TRANSCRIBE_CMD` also accepts a JSON argv array, so binary paths containing spaces work; whitespace-only values no longer call `execFile(undefined)`
+- Oversized or failed attachment downloads no longer invoke Claude with an empty prompt, and early returns no longer strand the "Thinking..." preview
+
 ## 0.8.2 - 2026-04-02
 
 ### Fixes
