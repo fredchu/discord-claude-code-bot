@@ -425,7 +425,7 @@ function runClaudeStreaming(opts: {
       }
     });
 
-    const timeout = opts.timeoutMs ?? 5_400_000;
+    const timeout = opts.timeoutMs ?? 9_000_000;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -434,7 +434,7 @@ function runClaudeStreaming(opts: {
       const partial = resultText || lastSeenText || "";
       if (partial) {
         resolve({
-          text: partial + "\n\n⚠️ *Task timed out after 90 min — partial result above.*",
+          text: partial + "\n\n⚠️ *Task timed out after 2.5 hr — partial result above.*",
           exitCode: 124,
           costUsd,
         });
