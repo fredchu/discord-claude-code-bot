@@ -31,6 +31,9 @@ ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 
+# Agent dispatch artifacts
+.codex-dispatch/
+
 # IDE
 .vscode/
 .idea/
