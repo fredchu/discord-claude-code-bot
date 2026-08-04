@@ -50,9 +50,31 @@ npm start
 | `DEFAULT_CWD` | No | Default working directory for Claude Code (defaults to `process.cwd()`) |
 | `CLAUDE_BIN` | No | Path to Claude Code binary (defaults to `claude`) |
 | `ALLOWED_USER_IDS` | No | Comma-separated Discord user IDs allowed to use the bot at all, covering messages, slash commands, and buttons. When unset, anyone who can see the thread may use it, preserving the historical behavior. |
-| `VOICE_TRANSCRIBE_CMD` | No | Command used to transcribe Discord voice messages. Transcription is entirely off unless this is set; when unset, voice messages are ignored, and one that replies to the bot gets a short notice instead of being handed to Claude as an audio path it cannot read. The audio path is appended as the final argument and the transcript must be printed to stdout. The value is split on whitespace; use a JSON array such as `["/opt/my tools/whisper.sh","--model","large-v3"]` for paths containing spaces or arguments needing quoting. |
+| `VOICE_TRANSCRIBE_CMD` | No | Command used to transcribe Discord voice messages. Transcription is entirely off unless this is set; when unset, voice messages are ignored, and one that replies to the bot gets a short notice instead of being handed to Claude as an audio path it cannot read. The audio path is appended as the final argument and the transcript must be printed to stdout. The value is split on whitespace; use a JSON array such as `["python3","/path/to/discord-claude-code-bot/scripts/transcribe.py"]` for paths containing spaces or arguments needing quoting. See the reference helper at `scripts/transcribe.py`. |
 | `VOICE_TRANSCRIBE_TIMEOUT_MS` | No | Transcription-command timeout in milliseconds (defaults to `300000`; invalid values fall back to that default). |
 | `VOICE_ALLOWED_USER_IDS` | No | Comma-separated Discord user-ID list allowed to use the voice-message mention exemption. When unset, only the thread's creator is allowed. |
+
+### Voice transcription helper
+
+The reference helper at `scripts/transcribe.py` needs Python and one ASR package, but only when voice transcription is enabled. On Apple Silicon macOS, install `mlx-whisper` and make sure `ffmpeg` is on `PATH`:
+
+```bash
+pip install mlx-whisper
+export VOICE_TRANSCRIBE_CMD='["python3","/path/to/discord-claude-code-bot/scripts/transcribe.py"]'
+```
+
+On Windows without a discrete GPU, install `faster-whisper` for CPU transcription. The JSON-argv path uses forward slashes because bare backslashes are not valid JSON escapes:
+
+```powershell
+py -m pip install faster-whisper
+$env:VOICE_TRANSCRIBE_CMD='["py","C:/path/to/discord-claude-code-bot/scripts/transcribe.py"]'
+```
+
+Point `VOICE_TRANSCRIBE_CMD` at the same interpreter you installed the package into. An isolated install is easy to get wrong here: `pipx install mlx-whisper` puts the package in its own environment, so the command has to name that environment's Python (`~/.local/pipx/venvs/mlx-whisper/bin/python`) rather than the system `python3`, which will not find it.
+
+The helper auto-detects the backend; add `--backend mlx` or `--backend faster-whisper` to force one. Its mlx default is Breeze (`eoleedi/Breeze-ASR-25-mlx`), rather than the faster turbo model, because turbo hallucinated on silence in testing and Breeze did not. The CPU default is `large-v3-turbo`, about 2.2-2.4x faster than `large-v3`, measured on the maintainer's macOS CPU — indicative, not a prediction for other hardware.
+
+The first run downloads the model (~2.9 GB for Breeze, ~1.5 GB for turbo) and will very likely exceed `VOICE_TRANSCRIBE_TIMEOUT_MS`. Run the script once from a terminal to warm the model cache before using it from Discord. Use `--terms PATH` to supply names or domain vocabulary as an initial prompt; a missing or unreadable terms file is a hard error by design. `--model` overrides the backend's default model, and `--language` defaults to `zh`. `--no-vad` turns off faster-whisper's silence filtering — the mlx backend has none — and is unsafe: VAD is the measured protection against a silent recording becoming a hallucinated instruction.
 
 The bot runs Claude Code with permission checks skipped, so anyone authorized to talk to it can run code on the host. Set `ALLOWED_USER_IDS` as the real access control. The voice exemption's thread-creator default is only a convenience, not a security boundary, because anyone can create a thread.
 
@@ -187,9 +209,31 @@ npm start
 | `DEFAULT_CWD` | 否 | Claude Code 的預設工作目錄（預設為 `process.cwd()`） |
 | `CLAUDE_BIN` | 否 | Claude Code 執行檔路徑（預設為 `claude`） |
 | `ALLOWED_USER_IDS` | 否 | 可使用機器人所有功能的 Discord 使用者 ID 清單，以逗號分隔，涵蓋訊息、斜線指令與按鈕。未設定時，任何看得到討論串的人都可使用，維持原有行為。 |
-| `VOICE_TRANSCRIBE_CMD` | 否 | 轉錄 Discord 語音訊息的指令。除非設定此變數，否則轉錄功能完全關閉；未設定時，語音訊息會被忽略，若是以回覆機器人的方式送出，則會收到一則提示，而不會把機器人讀不了的音檔路徑交給 Claude。音檔路徑會接在最後一個參數，轉錄稿必須輸出到 stdout。此值會依空白切分；若路徑含空白或參數需要引號，請使用 JSON 陣列，例如 `["/opt/my tools/whisper.sh","--model","large-v3"]`。 |
+| `VOICE_TRANSCRIBE_CMD` | 否 | 轉錄 Discord 語音訊息的指令。除非設定此變數，否則轉錄功能完全關閉；未設定時，語音訊息會被忽略，若是以回覆機器人的方式送出，則會收到一則提示，而不會把機器人讀不了的音檔路徑交給 Claude。音檔路徑會接在最後一個參數，轉錄稿必須輸出到 stdout。此值會依空白切分；若路徑含空白或參數需要引號，請使用 JSON 陣列，例如 `["python3","/path/to/discord-claude-code-bot/scripts/transcribe.py"]`。參考 helper 位於 `scripts/transcribe.py`。 |
 | `VOICE_TRANSCRIBE_TIMEOUT_MS` | 否 | 轉錄指令的逾時毫秒數（預設 `300000`；無效值會改用此預設值）。 |
 | `VOICE_ALLOWED_USER_IDS` | 否 | 可使用語音訊息免標註規則的 Discord 使用者 ID 清單，以逗號分隔。未設定時，預設只允許討論串建立者。 |
+
+### 語音轉錄 helper
+
+參考 helper `scripts/transcribe.py` 需要 Python 與一套 ASR 套件，但只有啟用語音轉錄時才需要安裝。在 Apple Silicon macOS 上，請安裝 `mlx-whisper`，並確認 `ffmpeg` 位於 `PATH`：
+
+```bash
+pip install mlx-whisper
+export VOICE_TRANSCRIBE_CMD='["python3","/path/to/discord-claude-code-bot/scripts/transcribe.py"]'
+```
+
+在沒有獨立顯示卡的 Windows 上，請安裝 `faster-whisper`，以 CPU 進行轉錄。JSON argv 的路徑使用正斜線，因為未跳脫的反斜線不是有效的 JSON 跳脫字元：
+
+```powershell
+py -m pip install faster-whisper
+$env:VOICE_TRANSCRIBE_CMD='["py","C:/path/to/discord-claude-code-bot/scripts/transcribe.py"]'
+```
+
+`VOICE_TRANSCRIBE_CMD` 要指向你實際安裝該套件的那個直譯器。隔離式安裝在這裡特別容易出錯：`pipx install mlx-whisper` 會把套件放進它自己的環境，因此指令必須指名那個環境的 Python（`~/.local/pipx/venvs/mlx-whisper/bin/python`），而不是系統的 `python3`——系統 `python3` 找不到它。
+
+Helper 會自動偵測 backend；也可加入 `--backend mlx` 或 `--backend faster-whisper` 強制指定。mlx 預設使用 Breeze（`eoleedi/Breeze-ASR-25-mlx`），而不是速度較快的 turbo，因為實測 turbo 會在靜音中產生幻覺，Breeze 則不會。CPU 預設使用 `large-v3-turbo`；維護者以 macOS CPU 實測，比 `large-v3` 快約 2.2–2.4 倍，此數字僅供參考，並非對其他硬體的效能預測。
+
+第一次執行會下載模型（Breeze 約 2.9 GB、turbo 約 1.5 GB），很可能超過 `VOICE_TRANSCRIBE_TIMEOUT_MS`。從 Discord 使用前，請先在終端機執行一次，讓模型快取完成。`--terms PATH` 可把名稱或領域詞彙作為 initial prompt；詞彙檔不存在或無法讀取時，程式會刻意直接報錯。`--model` 可覆蓋該 backend 的預設模型，`--language` 預設為 `zh`。`--no-vad` 會停用 faster-whisper 的靜音過濾（mlx backend 本來就沒有），因此並不安全：實測顯示，VAD 是避免無聲錄音變成幻覺指令的保護機制。
 
 機器人執行 Claude Code 時會略過權限檢查，因此任何獲准與它互動的人都能在主機上執行程式碼。真正的存取控制是設定 `ALLOWED_USER_IDS`。語音免標註規則預設允許討論串建立者只是方便使用，並非安全邊界，因為任何人都能建立討論串。
 
