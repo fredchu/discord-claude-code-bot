@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import {
   Client, GatewayIntentBits, Events,
@@ -521,6 +521,50 @@ async function downloadAttachment(url: string, filepath: string): Promise<void> 
   const buf = Buffer.from(await res.arrayBuffer());
   fs.mkdirSync(path.dirname(filepath), { recursive: true });
   fs.writeFileSync(filepath, buf);
+}
+
+// --- Voice messages ---
+//
+// A Discord voice message is an .ogg attachment carrying the IsVoiceMessage flag.
+// Two things make it invisible to the bot as-is:
+//   1. It has no text content, so it can never @mention anyone — the mention gate
+//      drops it before anything else runs.
+//   2. Even once it gets through, only the file path reaches Claude, and the Read
+//      tool cannot read audio — so the message silently does nothing.
+//
+// Transcription is opt-in via VOICE_TRANSCRIBE_CMD (a command taking the audio
+// file path as its final argument and printing the transcript to stdout, e.g.
+// a whisper wrapper). When unset, voice messages still reach Claude as an
+// attachment path — same as before — so this is additive.
+const DISCORD_FLAG_IS_VOICE_MESSAGE = 8192;
+const VOICE_TRANSCRIBE_CMD = process.env.VOICE_TRANSCRIBE_CMD ?? "";
+const VOICE_TRANSCRIBE_TIMEOUT_MS = Number(process.env.VOICE_TRANSCRIBE_TIMEOUT_MS ?? 300_000);
+
+function isVoiceMessage(message: Message): boolean {
+  const bits = (message.flags as { bitfield?: number } | undefined)?.bitfield ?? 0;
+  return (Number(bits) & DISCORD_FLAG_IS_VOICE_MESSAGE) !== 0;
+}
+
+function transcribeVoice(filepath: string): Promise<{ ok: boolean; text: string; note: string }> {
+  return new Promise((resolve) => {
+    if (!VOICE_TRANSCRIBE_CMD) {
+      resolve({ ok: false, text: "", note: "VOICE_TRANSCRIBE_CMD not configured" });
+      return;
+    }
+    const parts = VOICE_TRANSCRIBE_CMD.split(" ").filter(Boolean);
+    const [bin, ...args] = parts;
+    execFile(bin, [...args, filepath],
+      { timeout: VOICE_TRANSCRIBE_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        const text = (stdout || "").trim();
+        if (err || !text) {
+          resolve({ ok: false, text: "", note: (stderr || err?.message || "no output").toString().slice(0, 200) });
+          return;
+        }
+        // stderr often carries duration/language diagnostics — keep it for the log
+        resolve({ ok: true, text, note: (stderr || "").toString().trim().slice(0, 200) });
+      });
+  });
 }
 
 // --- Chunked message sending ---
@@ -1080,9 +1124,12 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     if (message.author.bot) return;
 
-    // Only respond in threads, and only when mentioned
+    // Only respond in threads, and only when mentioned.
+    // Voice messages are exempt from the mention requirement: they carry no text,
+    // so mentioning is impossible. A thread is already a scoped conversation, so
+    // this does not make the bot answer arbitrary voice notes elsewhere.
     if (!message.channel.isThread()) return;
-    if (!message.mentions.has(client.user!.id)) return;
+    if (!message.mentions.has(client.user!.id) && !isVoiceMessage(message)) return;
 
     const content = message.content.replace(/<@!?\d+>/g, "").trim();
     const attachments = [...message.attachments.values()];
@@ -1120,7 +1167,28 @@ client.on(Events.MessageCreate, async (message) => {
     try {
       const history = await fetchThreadHistory(message.channel, entry, client.user!.id, message.id);
       let userMessage = content;
-      if (filePaths.length === 1) {
+
+      // Voice message: transcribe first, so what the user *said* becomes the
+      // instruction. Without this Claude only receives a path to an audio file
+      // it has no way to read.
+      let voiceTranscript = "";
+      if (isVoiceMessage(message) && filePaths.length > 0 && VOICE_TRANSCRIBE_CMD) {
+        await previewState.msg?.edit("🎤 *Transcribing voice message...*").catch(() => {});
+        const r = await transcribeVoice(filePaths[0]);
+        if (r.ok) {
+          voiceTranscript = r.text;
+          console.log(`[discord-cc-bot] voice transcribed (${r.text.length} chars) ${r.note}`);
+        } else {
+          console.error(`[discord-cc-bot] voice transcribe failed: ${r.note}`);
+          await message.channel.send(`⚠️ Voice transcription failed, falling back to the attachment path: ${r.note}`).catch(() => {});
+        }
+      }
+
+      if (voiceTranscript) {
+        // content is normally empty for voice messages; keep it if present
+        userMessage = [content, `[Voice message from the user, transcript follows]\n${voiceTranscript}`]
+          .filter(Boolean).join("\n\n").trim();
+      } else if (filePaths.length === 1) {
         userMessage = `${content}\n\nThe user attached a file: ${filePaths[0]}`.trim();
       } else if (filePaths.length > 1) {
         userMessage = `${content}\n\nThe user attached files:\n${filePaths.map((p) => `- ${p}`).join("\n")}`.trim();

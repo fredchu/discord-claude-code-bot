@@ -49,6 +49,8 @@ npm start
 | `GUILD_ID` | No | Server ID for instant slash command registration. Without it, global commands can take up to 1 hour to propagate. |
 | `DEFAULT_CWD` | No | Default working directory for Claude Code (defaults to `process.cwd()`) |
 | `CLAUDE_BIN` | No | Path to Claude Code binary (defaults to `claude`) |
+| `VOICE_TRANSCRIBE_CMD` | No | Command used to transcribe Discord voice messages. It receives the audio file path as its final argument and must print the transcript to stdout (e.g. `python /path/to/transcribe.py`). Unset = voice messages are passed through as attachment paths, as before. |
+| `VOICE_TRANSCRIBE_TIMEOUT_MS` | No | Timeout for the transcription command (defaults to `300000`) |
 
 ## Architecture
 
@@ -180,6 +182,8 @@ npm start
 | `GUILD_ID` | 否 | 伺服器 ID，用於即時註冊斜線指令。不設的話全域指令最多需 1 小時生效。 |
 | `DEFAULT_CWD` | 否 | Claude Code 的預設工作目錄（預設為 `process.cwd()`） |
 | `CLAUDE_BIN` | 否 | Claude Code 執行檔路徑（預設為 `claude`） |
+| `VOICE_TRANSCRIBE_CMD` | 否 | 轉錄 Discord 語音訊息的指令。音檔路徑會接在最後一個參數，轉錄稿請輸出到 stdout（例：`python /path/to/transcribe.py`）。不設定時語音訊息維持原本行為，只傳附件路徑。 |
+| `VOICE_TRANSCRIBE_TIMEOUT_MS` | 否 | 轉錄指令的逾時毫秒數（預設 `300000`） |
 
 ## 架構
 
