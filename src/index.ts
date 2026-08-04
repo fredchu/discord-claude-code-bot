@@ -8,7 +8,8 @@ import {
   REST, Routes, SlashCommandBuilder,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
-  type Message, type Collection, type Snowflake,
+  MessageFlags,
+  type Message, type Collection, type Snowflake, type ThreadChannel,
 } from "discord.js";
 
 // --- ThreadMap (SQLite-backed) ---
@@ -534,25 +535,63 @@ async function downloadAttachment(url: string, filepath: string): Promise<void> 
 //
 // Transcription is opt-in via VOICE_TRANSCRIBE_CMD (a command taking the audio
 // file path as its final argument and printing the transcript to stdout, e.g.
-// a whisper wrapper). When unset, voice messages still reach Claude as an
-// attachment path — same as before — so this is additive.
-const DISCORD_FLAG_IS_VOICE_MESSAGE = 8192;
-const VOICE_TRANSCRIBE_CMD = process.env.VOICE_TRANSCRIBE_CMD ?? "";
-const VOICE_TRANSCRIBE_TIMEOUT_MS = Number(process.env.VOICE_TRANSCRIBE_TIMEOUT_MS ?? 300_000);
+// a whisper wrapper). When unset, voice messages remain ignored because they
+// cannot satisfy the mention gate.
+function parseUserIds(raw: string | undefined): string[] {
+  return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function parseCommand(raw: string | undefined): string[] {
+  const s = (raw ?? "").trim();
+  if (!s) return [];
+  if (s.startsWith("[")) {
+    try {
+      const arr: unknown = JSON.parse(s);
+      if (Array.isArray(arr) && arr.length > 0 && arr.every((x) => typeof x === "string") && (arr[0] as string).trim() !== "") {
+        return arr as string[];
+      }
+    } catch { /* fall through to the warning */ }
+    console.warn("[discord-cc-bot] VOICE_TRANSCRIBE_CMD looks like JSON but is not a non-empty array of strings; voice transcription disabled");
+    return [];
+  }
+  return s.split(/\s+/).filter(Boolean);
+}
+
+const VOICE_ARGV = parseCommand(process.env.VOICE_TRANSCRIBE_CMD);
+const VOICE_ALLOWED_RAW = process.env.VOICE_ALLOWED_USER_IDS;
+const VOICE_ALLOWED_CONFIGURED = VOICE_ALLOWED_RAW !== undefined && VOICE_ALLOWED_RAW.trim() !== "";
+const VOICE_ALLOWED_USER_IDS = parseUserIds(VOICE_ALLOWED_RAW);
+const MAX_TIMER_MS = 2_147_483_647;
+const VOICE_TRANSCRIBE_TIMEOUT_MS = (() => {
+  const raw = process.env.VOICE_TRANSCRIBE_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return 300_000;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1 || n > MAX_TIMER_MS) {
+    console.warn(`[discord-cc-bot] invalid VOICE_TRANSCRIBE_TIMEOUT_MS=${raw}, using 300000`);
+    return 300_000;
+  }
+  return Math.floor(n);
+})();
 
 function isVoiceMessage(message: Message): boolean {
-  const bits = (message.flags as { bitfield?: number } | undefined)?.bitfield ?? 0;
-  return (Number(bits) & DISCORD_FLAG_IS_VOICE_MESSAGE) !== 0;
+  return message.flags.has(MessageFlags.IsVoiceMessage);
+}
+
+function voiceExemptionApplies(message: Message): boolean {
+  if (!isVoiceMessage(message)) return false;
+  if (VOICE_ARGV.length === 0) return false;
+  if (!message.channel.isThread()) return false;
+  if (VOICE_ALLOWED_CONFIGURED) return VOICE_ALLOWED_USER_IDS.includes(message.author.id);
+  return message.author.id === message.channel.ownerId;
 }
 
 function transcribeVoice(filepath: string): Promise<{ ok: boolean; text: string; note: string }> {
   return new Promise((resolve) => {
-    if (!VOICE_TRANSCRIBE_CMD) {
-      resolve({ ok: false, text: "", note: "VOICE_TRANSCRIBE_CMD not configured" });
+    if (VOICE_ARGV.length === 0) {
+      resolve({ ok: false, text: "", note: "voice transcription not configured" });
       return;
     }
-    const parts = VOICE_TRANSCRIBE_CMD.split(" ").filter(Boolean);
-    const [bin, ...args] = parts;
+    const [bin, ...args] = VOICE_ARGV;
     execFile(bin, [...args, filepath],
       { timeout: VOICE_TRANSCRIBE_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
       (err, stdout, stderr) => {
@@ -683,6 +722,13 @@ type PreviewState = {
 
 function createPreviewState(): PreviewState {
   return { msg: null, lastText: "", lastEditTime: 0, timer: null, pendingText: "", startTime: Date.now(), toolsUsed: [] };
+}
+
+async function finishPreview(state: PreviewState, channel: ThreadChannel, text: string): Promise<void> {
+  if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+  if (!state.msg) { await channel.send(text).catch(() => {}); return; }
+  try { await state.msg.edit(text); }
+  catch { await state.msg.delete().catch(() => {}); await channel.send(text).catch(() => {}); }
 }
 
 function formatElapsed(startTime: number): string {
@@ -1124,12 +1170,10 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     if (message.author.bot) return;
 
-    // Only respond in threads, and only when mentioned.
-    // Voice messages are exempt from the mention requirement: they carry no text,
-    // so mentioning is impossible. A thread is already a scoped conversation, so
-    // this does not make the bot answer arbitrary voice notes elsewhere.
+    // Only respond in threads, and only when mentioned. Configured voice messages
+    // are exempt for allowed users, or for the thread creator by default.
     if (!message.channel.isThread()) return;
-    if (!message.mentions.has(client.user!.id) && !isVoiceMessage(message)) return;
+    if (!message.mentions.has(client.user!.id) && !voiceExemptionApplies(message)) return;
 
     const content = message.content.replace(/<@!?\d+>/g, "").trim();
     const attachments = [...message.attachments.values()];
@@ -1172,16 +1216,20 @@ client.on(Events.MessageCreate, async (message) => {
       // instruction. Without this Claude only receives a path to an audio file
       // it has no way to read.
       let voiceTranscript = "";
-      if (isVoiceMessage(message) && filePaths.length > 0 && VOICE_TRANSCRIBE_CMD) {
+      if (isVoiceMessage(message) && VOICE_ARGV.length > 0) {
+        if (filePaths.length === 0) {
+          await finishPreview(previewState, message.channel, "⚠️ *Voice message could not be downloaded (too large, or the download failed).*");
+          return;
+        }
         await previewState.msg?.edit("🎤 *Transcribing voice message...*").catch(() => {});
         const r = await transcribeVoice(filePaths[0]);
-        if (r.ok) {
-          voiceTranscript = r.text;
-          console.log(`[discord-cc-bot] voice transcribed (${r.text.length} chars) ${r.note}`);
-        } else {
+        if (!r.ok) {
           console.error(`[discord-cc-bot] voice transcribe failed: ${r.note}`);
-          await message.channel.send(`⚠️ Voice transcription failed, falling back to the attachment path: ${r.note}`).catch(() => {});
+          await finishPreview(previewState, message.channel, `⚠️ *Voice transcription failed:* ${r.note}`);
+          return;
         }
+        voiceTranscript = r.text;
+        console.log(`[discord-cc-bot] voice transcribed (${r.text.length} chars) ${r.note}`);
       }
 
       if (voiceTranscript) {
